@@ -1,0 +1,10 @@
+compile_commands.json
+build
+build-*
+data/
+
+.clangd
+.cache
+.vscode
+.cquery_cache
+*.code-workspace

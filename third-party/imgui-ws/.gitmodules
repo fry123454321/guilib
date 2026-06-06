@@ -1,0 +1,6 @@
+[submodule "imgui"]
+	path = third-party/imgui/imgui
+	url = https://github.com/ocornut/imgui
+[submodule "incppect"]
+	path = third-party/incppect
+	url = https://github.com/ggerganov/incppect
