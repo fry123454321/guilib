@@ -1,11 +1,20 @@
 file(READ "incppect.js" src_incppect_js)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/common.h.in ${CMAKE_CURRENT_SOURCE_DIR}/common.h @ONLY)
 
-add_library(incppect SHARED incppect.cpp)
+add_library(incppect STATIC incppect.cpp)
+libgui_apply_target_defaults(incppect)
 target_include_directories(incppect PUBLIC ../include)
 target_include_directories(incppect PRIVATE .)
 target_link_libraries(incppect PRIVATE uwebsockets::uwebsockets)
 
 if (INCPPECT_DEBUG)
     target_compile_definitions(incppect PRIVATE INCPPECT_DEBUG=1)
+endif ()
+
+if (NOT INCPPECT_NO_SSL)
+    if(LIBGUI_FIND_DEPS OR NOT TARGET OpenSSL::SSL)
+        find_package(OpenSSL REQUIRED)
+    endif()
+    target_link_libraries(incppect PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(incppect PRIVATE INCPPECT_HAVE_SSL=1)
 endif ()

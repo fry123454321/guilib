@@ -30,12 +30,14 @@ class Incppect {
 
         // service parameters
         struct Parameters {
+            std::string hostListen = "0.0.0.0";
             int32_t portListen = 3000;
             int32_t maxPayloadLength_bytes = 256*1024;
             int64_t tLastRequestTimeout_ms = 3000;
             int32_t tIdleTimeout_s = 120;
 
             std::string httpRoot = ".";
+            std::string staticRoot;
             std::vector<std::string> resources;
 
             std::string sslKey = "key.pem";
@@ -76,6 +78,13 @@ class Incppect {
         //   var("path2[%d].foo[%d]", [](auto idxs) { ... idxs[0], idxs[1] ... });
         //
         bool var(const TPath & path, TGetter && getter);
+
+        std::vector<TPath> varPaths() const;
+        std::vector<char> sampleVar(const TPath & path, const TIdxs & idxs = {}) const;
+        std::vector<TUrl> embeddedResources() const;
+        std::vector<TUrl> httpResourceRoutes() const;
+        std::string httpRoot() const;
+        std::string staticRoot() const;
 
         // handle input from the clients
         void handler(THandler && handler);

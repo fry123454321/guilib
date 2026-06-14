@@ -1,3 +1,23 @@
+var DOM_KEY_CODE_MIN = 1;
+var DOM_KEY_CODE_MAX = 255;
+
+var DOM_KEY_CODE = {
+    TAB: 9,
+    BACKSPACE: 8,
+    ESCAPE: 27,
+    SPACE: 32,
+    PAGE_UP: 33,
+    PAGE_DOWN: 34,
+    END: 35,
+    HOME: 36,
+    LEFT: 37,
+    UP: 38,
+    RIGHT: 39,
+    DOWN: 40,
+    A: 65,
+    V: 86,
+};
+
 var imgui_ws = {
     canvas: null,
     gl: null,
@@ -12,7 +32,8 @@ var imgui_ws = {
     attribute_location_uv: null,
     attribute_location_color: null,
 
-    device_pixel_ratio: window.device_pixel_ratio || 1,
+    device_pixel_ratio: window.devicePixelRatio || 1,
+    ui_scale: 1.0,
 
     tex_map_id: {},
     tex_map_rev: {},
@@ -29,8 +50,261 @@ var imgui_ws = {
         want_capture_keyboard: true,
     },
 
+    // RGBA, диапазон 0..1
+    clear_color: [0.45, 0.33, 0.60, 1.00],
+    clear_color_rev: -1,
+    clear_color_rev_pending: null,
+
+    clipboard_rev: -1,
+    clipboard_text_from_imgui: '',
+
+    mod_ctrl: false,
+    mod_meta: false,
+    _modifiers_installed: false,
+    _resize_installed: false,
+
+    clipboard_log_max: 14,
+    clipboard_log_lines: [],
+
+    clipboard_quoted: function(text, maxLen) {
+        text = text != null ? String(text) : '';
+        if (maxLen && text.length > maxLen) {
+            text = text.slice(0, maxLen) + '...';
+        }
+        return JSON.stringify(text);
+    },
+
+    clipboard_log: function(message) {
+        console.log(message);
+        this.clipboard_log_lines.unshift(message);
+        if (this.clipboard_log_lines.length > this.clipboard_log_max) {
+            this.clipboard_log_lines.length = this.clipboard_log_max;
+        }
+        var el = document.getElementById('clipboard-log');
+        if (el) {
+            el.textContent = this.clipboard_log_lines.join('\n');
+        }
+    },
+
+    update_modifiers: function(event) {
+        if (!event) {
+            this.mod_ctrl = false;
+            this.mod_meta = false;
+            return;
+        }
+        var gms = event.getModifierState ? event.getModifierState.bind(event) : null;
+        this.mod_ctrl = !!(event.ctrlKey || (gms && gms('Control')));
+        this.mod_meta = !!(event.metaKey || (gms && gms('Meta')));
+    },
+
+    modifiers_active: function(event) {
+        this.update_modifiers(event);
+        return this.mod_ctrl || this.mod_meta;
+    },
+
+    is_paste_key: function(event) {
+        return event.key === 'v' || event.key === 'V' ||
+            event.code === 'KeyV' || event.keyCode === DOM_KEY_CODE.V;
+    },
+
+    is_select_all_key: function(event) {
+        return this.modifiers_active(event) && (
+            event.key === 'a' || event.key === 'A' ||
+            event.code === 'KeyA' || event.keyCode === DOM_KEY_CODE.A);
+    },
+
+    is_text_input_key: function(event) {
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+            return false;
+        }
+        if (event.key === 'Dead' || event.key === 'Process' || event.key === 'Unidentified') {
+            return false;
+        }
+        if (event.key.length === 1) {
+            var cp = event.key.charCodeAt(0);
+            return cp >= DOM_KEY_CODE.SPACE || cp > 127;
+        }
+        return false;
+    },
+
+    // Tab and other keys Chrome uses for page focus / scrolling instead of sending to canvas.
+    should_prevent_browser_default: function(event) {
+        if (!this.io.want_capture_keyboard) {
+            return false;
+        }
+        if (this.is_select_all_key(event)) {
+            return true;
+        }
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+            return false;
+        }
+        var code = event.keyCode;
+        if (code === DOM_KEY_CODE.TAB) {
+            return true;
+        }
+        if (code === DOM_KEY_CODE.BACKSPACE ||
+            code === DOM_KEY_CODE.ESCAPE ||
+            code === DOM_KEY_CODE.SPACE ||
+            (code >= DOM_KEY_CODE.PAGE_UP && code <= DOM_KEY_CODE.DOWN)) {
+            return true;
+        }
+        return false;
+    },
+
+    send_text_input: function(incppect, text) {
+        text = text != null ? String(text) : '';
+        if (!text) {
+            return;
+        }
+        var byte_len = new TextEncoder().encode(text).length;
+        incppect.send('4 ' + byte_len + ' ' + text);
+    },
+
+    send_resize: function(incppect) {
+        if (!this.canvas) {
+            return;
+        }
+
+        var wrap = this.canvas.parentElement;
+        if (wrap) {
+            var dpr = window.devicePixelRatio || 1;
+            var cssW = wrap.clientWidth;
+            var cssH = wrap.clientHeight;
+            if (cssW >= 1 && cssH >= 1) {
+                this.canvas.width = Math.round(cssW * dpr);
+                this.canvas.height = Math.round(cssH * dpr);
+                this.canvas.style.width = cssW + 'px';
+                this.canvas.style.height = cssH + 'px';
+                this.device_pixel_ratio = dpr;
+            }
+        } else {
+            this.device_pixel_ratio = window.devicePixelRatio || 1;
+        }
+
+        var dprSafe = this.device_pixel_ratio > 0.01 ? this.device_pixel_ratio : 1.0;
+        var logicalW = this.canvas.width / dprSafe;
+        var logicalH = this.canvas.height / dprSafe;
+        if (logicalW < 256 || logicalH < 256) {
+            return;
+        }
+
+        this.update_gl_display_size();
+        incppect.send('7 ' + this.canvas.width + ' ' + this.canvas.height + ' ' + this.device_pixel_ratio);
+    },
+
+    schedule_send_resize: function(incppect) {
+        var self = this;
+        requestAnimationFrame(function() {
+            requestAnimationFrame(function() {
+                self.send_resize(incppect);
+            });
+        });
+    },
+
+    pointer_pos: function(event) {
+        var rect = this.canvas.getBoundingClientRect();
+        var scaleX = this.canvas.width / rect.width;
+        var scaleY = this.canvas.height / rect.height;
+        return {
+            x: (event.clientX - rect.left) * scaleX,
+            y: (event.clientY - rect.top) * scaleY,
+        };
+    },
+
+    logical_size: function() {
+        var scale = this.effective_ui_scale();
+        return {
+            w: this.canvas ? this.canvas.width / scale : 0,
+            h: this.canvas ? this.canvas.height / scale : 0,
+        };
+    },
+
+    effective_ui_scale: function() {
+        var ui = this.ui_scale > 0.01 ? this.ui_scale : 1.0;
+        var dpr = this.device_pixel_ratio > 0.01 ? this.device_pixel_ratio : 1.0;
+        return ui * dpr;
+    },
+
+    incppect_ui_scale: function(incppect) {
+        var scale = incppect.get_float('imgui.ui_scale');
+        if (isFinite(scale) && scale > 0.01) {
+            this.ui_scale = scale;
+        }
+    },
+
+    update_gl_display_size: function() {
+        if (!this.gl || !this.canvas || !this.shader_program) {
+            return;
+        }
+
+        var physW = this.canvas.width;
+        var physH = this.canvas.height;
+        if (physW < 1 || physH < 1) {
+            return;
+        }
+
+        var logical = this.logical_size();
+        var w = logical.w;
+        var h = logical.h;
+        if (w < 1 || h < 1) {
+            return;
+        }
+
+        this.gl.viewport(0, 0, physW, physH);
+
+        var ortho_projection = new Float32Array([
+            2.0 / w, 0.0, 0.0, 0.0,
+            0.0, 2.0 / -h, 0.0, 0.0,
+            0.0, 0.0, -1.0, 0.0,
+            -1.0, 1.0, 0.0, 1.0,
+        ]);
+        this.gl.useProgram(this.shader_program);
+        this.gl.uniformMatrix4fv(this.attribute_location_proj_mtx, false, ortho_projection);
+    },
+
+    install_modifier_tracking: function() {
+        if (this._modifiers_installed) {
+            return;
+        }
+        this._modifiers_installed = true;
+        var self = this;
+        var sync = function(e) { self.update_modifiers(e); };
+        window.addEventListener('keydown', sync, true);
+        window.addEventListener('keyup', sync, true);
+        window.addEventListener('blur', function() { self.update_modifiers(null); });
+    },
+
+    set_clear_color: function(r, g, b, a) {
+        if (arguments.length === 1 && Array.isArray(r)) {
+            this.clear_color = r.slice(0, 4);
+        } else {
+            this.clear_color = [r, g, b, a !== undefined ? a : 1.0];
+        }
+        this.sync_page_background();
+    },
+
+    sync_page_background: function() {
+        var c = this.clear_color;
+        var css = 'rgb(' +
+            Math.round(c[0] * 255) + ',' +
+            Math.round(c[1] * 255) + ',' +
+            Math.round(c[2] * 255) + ')';
+        document.body.style.background = css;
+        var wrap = document.getElementById('canvas-wrap');
+        if (wrap) {
+            wrap.style.background = css;
+        }
+    },
+
+    clear_background: function() {
+        var c = this.clear_color;
+        this.gl.clearColor(c[0], c[1], c[2], c[3]);
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    },
+
     init: function(canvas_name) {
         this.canvas = document.getElementById(canvas_name);
+        this.install_modifier_tracking();
 
         var onkeyup = this.canvas_on_keyup.bind(this);
         var onkeydown = this.canvas_on_keydown.bind(this);
@@ -119,25 +393,10 @@ var imgui_ws = {
         this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
         this.gl.disable(this.gl.CULL_FACE);
         this.gl.disable(this.gl.DEPTH_TEST);
-        this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
-        var clip_off_x = 0.0;
-        var clip_off_y = 0.0;
-
-        const L = clip_off_x;
-        const R = clip_off_x + this.canvas.width;
-        const T = clip_off_y;
-        const B = clip_off_y + this.canvas.height;
-
-        const ortho_projection = new Float32Array([
-            2.0 / (R - L), 0.0, 0.0, 0.0,
-            0.0, 2.0 / (T - B), 0.0, 0.0,
-            0.0, 0.0, -1.0, 0.0,
-            (R + L) / (L - R), (T + B) / (B - T), 0.0, 1.0,
-        ]);
         this.gl.useProgram(this.shader_program);
         this.gl.uniform1i(this.attribute_location_tex, 0);
-        this.gl.uniformMatrix4fv(this.attribute_location_proj_mtx, false, ortho_projection);
+        this.update_gl_display_size();
 
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertex_buffer);
         this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.index_buffer);
@@ -148,6 +407,7 @@ var imgui_ws = {
         this.gl.vertexAttribPointer(this.attribute_location_position, 2, this.gl.FLOAT,         false, 5*4, 0);
         this.gl.vertexAttribPointer(this.attribute_location_uv,       2, this.gl.FLOAT,         false, 5*4, 2*4);
         this.gl.vertexAttribPointer(this.attribute_location_color,    4, this.gl.UNSIGNED_BYTE, true,  5*4, 4*4);
+        this.sync_page_background();
     },
 
     incppect_textures: function(incppect) {
@@ -235,6 +495,118 @@ var imgui_ws = {
         }
     },
 
+    send_paste_to_server: function(incppect, text) {
+        text = text != null ? String(text) : '';
+        var byte_len = new TextEncoder().encode(text).length;
+        incppect.send('9 ' + byte_len + ' ' + text);
+    },
+
+    decode_clipboard_abuf: function(abuf) {
+        if (!abuf || !abuf.byteLength) {
+            return '';
+        }
+        var bytes = new Uint8Array(abuf);
+        var nul = bytes.indexOf(0);
+        if (nul >= 0) {
+            bytes = bytes.subarray(0, nul);
+        }
+        return new TextDecoder('utf-8').decode(bytes);
+    },
+
+    clipboard_fallback_paste_to_imgui: function(incppect) {
+        var el = document.getElementById('clipboard-fallback-text');
+        var text = el ? el.value : '';
+        this.clipboard_log('костыль: вставка из поля в ImGui ' + this.clipboard_quoted(text));
+        this.send_paste_to_server(incppect, text);
+    },
+
+    clipboard_fallback_pull_from_imgui: function() {
+        var el = document.getElementById('clipboard-fallback-text');
+        var text = this.clipboard_text_from_imgui != null ? String(this.clipboard_text_from_imgui) : '';
+        if (el) {
+            el.value = text;
+            el.focus();
+            el.select();
+        }
+        this.clipboard_log('костыль: из ImGui в поле ' + this.clipboard_quoted(text));
+    },
+
+    paste_from_browser: function(incppect) {
+        var self = this;
+
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+            var empty = '';
+            self.clipboard_log('попытка вставить текст: ' + self.clipboard_quoted(empty));
+            self.send_paste_to_server(incppect, empty);
+            return;
+        }
+
+        navigator.clipboard.readText().then(function(text) {
+            text = text != null ? String(text) : '';
+            self.clipboard_log('попытка вставить текст: ' + self.clipboard_quoted(text));
+            self.send_paste_to_server(incppect, text);
+        }).catch(function() {
+            var empty = '';
+            self.clipboard_log('попытка вставить текст: ' + self.clipboard_quoted(empty));
+            self.send_paste_to_server(incppect, empty);
+        });
+    },
+
+    incppect_clipboard: function(incppect) {
+        // rev и text всегда в одном poll — иначе rev обновляется на кадр раньше текста
+        incppect.get_int32('imgui.clipboard_rev');
+        incppect.get_abuf('imgui.clipboard_text');
+
+        var abuf = incppect.get_abuf('imgui.clipboard_text');
+        var text = this.decode_clipboard_abuf(abuf);
+        this.clipboard_text_from_imgui = text;
+
+        var rev = incppect.get_int32('imgui.clipboard_rev');
+        if (!isFinite(rev) || rev === this.clipboard_rev) {
+            return;
+        }
+
+        // после перезагрузки страницы не считаем старый rev на сервере новым копированием
+        if (this.clipboard_rev < 0) {
+            this.clipboard_rev = rev;
+            return;
+        }
+
+        this.clipboard_rev = rev;
+
+        this.clipboard_log('попытка скопировать текст ' + this.clipboard_quoted(text));
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(function() {});
+        }
+    },
+
+    incppect_clear_color: function(incppect) {
+        // rev и компоненты в одном poll — как у clipboard
+        incppect.get_int32('imgui.clear_color_rev');
+        incppect.get_float('imgui.clear_color[%d]', 0);
+        incppect.get_float('imgui.clear_color[%d]', 1);
+        incppect.get_float('imgui.clear_color[%d]', 2);
+        incppect.get_float('imgui.clear_color[%d]', 3);
+
+        var rev = incppect.get_int32('imgui.clear_color_rev');
+        if (!isFinite(rev) || rev === this.clear_color_rev) {
+            return;
+        }
+
+        var r = incppect.get_float('imgui.clear_color[%d]', 0);
+        var g = incppect.get_float('imgui.clear_color[%d]', 1);
+        var b = incppect.get_float('imgui.clear_color[%d]', 2);
+        var a = incppect.get_float('imgui.clear_color[%d]', 3);
+        if (!isFinite(r) || !isFinite(g) || !isFinite(b)) {
+            return;
+        }
+
+        this.clear_color_rev = rev;
+        this.clear_color_rev_pending = null;
+        this.set_clear_color(r, g, b, isFinite(a) ? a : 1.0);
+    },
+
     render: function(n_draw_lists, draw_lists_abuf) {
         if (typeof n_draw_lists === "undefined" && typeof draw_lists_abuf === "undefined") {
             if (this.n_draw_lists === null) return;
@@ -245,6 +617,10 @@ var imgui_ws = {
             return;
         }
 
+        this.update_gl_display_size();
+
+        var uiScale = this.effective_ui_scale();
+        var logical = this.logical_size();
         var clip_off_x = 0.0;
         var clip_off_y = 0.0;
 
@@ -303,11 +679,17 @@ var imgui_ws = {
                 var clip_z = pf[2] - clip_off_x; draw_data_offset += 4;
                 var clip_w = pf[3] - clip_off_y; draw_data_offset += 4;
 
-                if (clip_x < this.canvas.width && clip_y < this.canvas.height && clip_z >= 0.0 && clip_w >= 0.0) {
-                    this.gl.scissor(clip_x, this.canvas.height - clip_w, clip_z - clip_x, clip_w - clip_y);
+                if (clip_x < logical.w && clip_y < logical.h && clip_z >= 0.0 && clip_w >= 0.0) {
+                    var sx = clip_x * uiScale;
+                    var sy = clip_y * uiScale;
+                    var sz = clip_z * uiScale;
+                    var sw = clip_w * uiScale;
+                    this.gl.scissor(sx, this.canvas.height - sw, sz - sx, sw - sy);
                     if (texture_id in this.tex_map_id) {
                         this.gl.activeTexture(this.gl.TEXTURE0);
                         this.gl.bindTexture(this.gl.TEXTURE_2D, this.tex_map_id[texture_id]);
+                    } else {
+                        this.gl.bindTexture(this.gl.TEXTURE_2D, null);
                     }
                     this.gl.drawElements(this.gl.TRIANGLES, n_elements, this.gl.UNSIGNED_SHORT, 2*offset_idx);
                 }
@@ -327,25 +709,61 @@ var imgui_ws = {
     canvas_on_touch: function(event) {},
 
     set_incppect_handlers: function(incppect) {
+        var self = this;
+        this.schedule_send_resize(incppect);
+        if (!this._resize_installed) {
+            this._resize_installed = true;
+            window.addEventListener('resize', function() {
+                self.schedule_send_resize(incppect);
+            });
+        }
+
         this.canvas_on_keyup = function(event) {
-            incppect.send('6 ' + event.keyCode);
+            var code = event.keyCode;
+            if (code >= DOM_KEY_CODE_MIN && code <= DOM_KEY_CODE_MAX) {
+                incppect.send('6 ' + code);
+            }
+            if (this.should_prevent_browser_default(event)) {
+                event.preventDefault();
+            }
         };
 
         this.canvas_on_keydown = function(event) {
-            incppect.send('5 ' + event.keyCode);
+            if (this.modifiers_active(event) && this.is_paste_key(event) && this.io.want_capture_keyboard) {
+                event.preventDefault();
+                this.paste_from_browser(incppect);
+                return;
+            }
+
+            if (this.io.want_capture_keyboard && this.is_text_input_key(event)) {
+                event.preventDefault();
+                this.send_text_input(incppect, event.key);
+                return;
+            }
+
+            var code = event.keyCode;
+            if (code >= DOM_KEY_CODE_MIN && code <= DOM_KEY_CODE_MAX) {
+                incppect.send('5 ' + code);
+            }
+            if (this.should_prevent_browser_default(event)) {
+                event.preventDefault();
+            }
         };
 
         this.canvas_on_keypress = function(event) {
-            incppect.send('4 ' + event.keyCode);
-
-            if (this.io.want_capture_keyboard) {
+            if (!this.io.want_capture_keyboard) {
+                return;
+            }
+            if (this.is_select_all_key(event) ||
+                (!event.ctrlKey && !event.metaKey && !event.altKey)) {
                 event.preventDefault();
             }
         };
 
         this.canvas_on_pointermove = function(event) {
-            this.io.mouse_x = event.offsetX * this.device_pixel_ratio;
-            this.io.mouse_y = event.offsetY * this.device_pixel_ratio;
+            var pos = this.pointer_pos(event);
+            this.io.mouse_x = pos.x;
+            this.io.mouse_y = pos.y;
 
             incppect.send('0 ' + this.io.mouse_x + ' ' + this.io.mouse_y);
 
@@ -355,8 +773,13 @@ var imgui_ws = {
         };
 
         this.canvas_on_pointerdown = function(event) {
-            this.io.mouse_x = event.offsetX * this.device_pixel_ratio;
-            this.io.mouse_y = event.offsetY * this.device_pixel_ratio;
+            if (this.canvas && typeof this.canvas.focus === 'function') {
+                this.canvas.focus();
+            }
+
+            var pos = this.pointer_pos(event);
+            this.io.mouse_x = pos.x;
+            this.io.mouse_y = pos.y;
 
             incppect.send('1 ' + event.button + ' ' + this.io.mouse_x + ' ' + this.io.mouse_y);
         };

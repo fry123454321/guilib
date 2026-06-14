@@ -15,13 +15,21 @@ add_library(imgui-ws ${IMTUI_LIBRARY_TYPE}
     compressor-xor-rle-per-draw-list-with-vtx-offset.cpp
     )
 
+libgui_apply_target_defaults(imgui-ws)
+
 target_include_directories(imgui-ws PUBLIC
     ../include
     )
 
-target_link_libraries(imgui-ws PRIVATE
-    imgui
-    incppect
-    ${CMAKE_DL_LIBS}
-    ${CMAKE_THREAD_LIBS_INIT}
+target_link_libraries(imgui-ws
+    PUBLIC
+        imgui
+        incppect
+    PRIVATE
+        ${CMAKE_DL_LIBS}
+        ${CMAKE_THREAD_LIBS_INIT}
     )
+
+if (NOT INCPPECT_NO_SSL)
+    target_compile_definitions(imgui-ws PUBLIC IMGUI_WS_HAVE_SSL=1)
+endif ()

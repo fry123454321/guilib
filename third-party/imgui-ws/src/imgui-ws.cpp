@@ -11,16 +11,45 @@
 #include "incppect/incppect.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <map>
+#include <optional>
 #include <thread>
 #include <sstream>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
 
-// not using ssl
-using incppect = Incppect<false>;
+namespace {
+
+bool parseClipboardText(std::string_view data, std::string & outText) {
+    const std::string s(data);
+    const auto sp = s.find(' ');
+    if (sp == std::string::npos) {
+        return false;
+    }
+
+    const auto sp2 = s.find(' ', sp + 1);
+    if (sp2 == std::string::npos) {
+        return false;
+    }
+
+    const int len = std::atoi(s.c_str() + sp + 1);
+    if (len > 0 && sp2 + 1 + (size_t) len <= s.size()) {
+        outText = s.substr(sp2 + 1, (size_t) len);
+    } else if (sp2 + 1 < s.size()) {
+        outText = s.substr(sp2 + 1);
+    } else {
+        outText.clear();
+    }
+
+    return true;
+}
+
+}
 
 struct ImGuiWS::Impl {
     struct Events {
@@ -56,140 +85,159 @@ struct ImGuiWS::Impl {
 
     Events events;
 
-    incppect incpp;
+    Incppect<false> incppPlain;
+#ifdef IMGUI_WS_HAVE_SSL
+    std::optional<Incppect<true>> incppSsl;
+    bool useSsl = false;
+#endif
 
     THandler handlerConnect;
     THandler handlerDisconnect;
 
     std::unique_ptr<ImDrawDataCompressor::Interface> compressorDrawData;
+
+    double lastEncodeMs = 0.0;
+    std::size_t lastEncodePayloadBytes = 0;
+
+    template<typename F>
+    decltype(auto) dispatch(F && f) {
+#ifdef IMGUI_WS_HAVE_SSL
+        if (useSsl) {
+            return f(*incppSsl);
+        }
+#endif
+        return f(incppPlain);
+    }
+
+    template<typename F>
+    decltype(auto) dispatch(F && f) const {
+#ifdef IMGUI_WS_HAVE_SSL
+        if (useSsl) {
+            return f(*incppSsl);
+        }
+#endif
+        return f(incppPlain);
+    }
+
+    template<bool SSL>
+    bool setupServer(
+            Incppect<SSL> & incpp,
+            int32_t port,
+            std::string pathHttp,
+            std::vector<std::string> resources,
+            const ImGuiWS::InitOptions & options);
 };
 
-ImGuiWS::ImGuiWS() : m_impl(new Impl()) {
-}
+template<bool SSL>
+bool ImGuiWS::Impl::setupServer(
+        Incppect<SSL> & incpp,
+        int32_t port,
+        std::string pathHttp,
+        std::vector<std::string> resources,
+        const ImGuiWS::InitOptions & options) {
+    using IC = Incppect<SSL>;
 
-ImGuiWS::~ImGuiWS() {
-    m_impl->incpp.stop();
-    if (m_impl->worker.joinable()) {
-        m_impl->worker.join();
-    }
-}
-
-bool ImGuiWS::addVar(const TPath & path, TGetter && getter) {
-    return m_impl->incpp.var(path, std::move(getter));
-}
-
-void ImGuiWS::addResource(const std::string & url, const std::string & content) {
-    m_impl->incpp.setResource(url, content);
-}
-
-bool ImGuiWS::init(int32_t port, std::string pathHttp, std::vector<std::string> resources) {
-    m_impl->incpp.var("my_id[%d]", [](const auto & idxs) {
+    incpp.var("my_id[%d]", [](const auto & idxs) {
         static int32_t id;
         id = idxs[0];
-        return incppect::view(id);
+        return IC::view(id);
     });
 
-    // number of textures available
-    m_impl->incpp.var("imgui.n_textures", [this](const auto & ) {
-        std::shared_lock lock(m_impl->mutex);
+    incpp.var("imgui.n_textures", [this](const auto & ) {
+        std::shared_lock lock(mutex);
 
-        return incppect::view(m_impl->dataRead.textures.size());
+        return IC::view(dataRead.textures.size());
     });
 
-    // texture ids
-    m_impl->incpp.var("imgui.texture_id[%d]", [this](const auto & idxs) {
-        std::shared_lock lock(m_impl->mutex);
+    incpp.var("imgui.texture_id[%d]", [this](const auto & idxs) {
+        std::shared_lock lock(mutex);
 
-        if (m_impl->dataRead.textureIdMap.find(idxs[0]) == m_impl->dataRead.textureIdMap.end()) {
+        if (dataRead.textureIdMap.find(idxs[0]) == dataRead.textureIdMap.end()) {
             return std::string_view { };
         }
 
-        return incppect::view(m_impl->dataRead.textureIdMap[idxs[0]]);
+        return IC::view(dataRead.textureIdMap[idxs[0]]);
     });
 
-    // texture revision
-    m_impl->incpp.var("imgui.texture_revision[%d]", [this](const auto & idxs) {
-        std::shared_lock lock(m_impl->mutex);
+    incpp.var("imgui.texture_revision[%d]", [this](const auto & idxs) {
+        std::shared_lock lock(mutex);
 
-        if (m_impl->dataRead.textures.find(idxs[0]) == m_impl->dataRead.textures.end()) {
+        if (dataRead.textures.find(idxs[0]) == dataRead.textures.end()) {
             return std::string_view { };
         }
 
-        return incppect::view(m_impl->dataRead.textures[idxs[0]].revision);
+        return IC::view(dataRead.textures[idxs[0]].revision);
     });
 
-    // get texture by id
-    m_impl->incpp.var("imgui.texture_data[%d]", [this](const auto & idxs) {
+    incpp.var("imgui.texture_data[%d]", [this](const auto & idxs) {
         static std::vector<char> data;
         {
-            std::shared_lock lock(m_impl->mutex);
-            if (m_impl->dataRead.textures.find(idxs[0]) == m_impl->dataRead.textures.end()) {
+            std::shared_lock lock(mutex);
+            if (dataRead.textures.find(idxs[0]) == dataRead.textures.end()) {
                 return std::string_view { 0, 0 };
             }
             data.clear();
-            std::copy(m_impl->dataRead.textures[idxs[0]].data.data(), m_impl->dataRead.textures[idxs[0]].data.data() + m_impl->dataRead.textures[idxs[0]].data.size(),
+            std::copy(dataRead.textures[idxs[0]].data.data(),
+                      dataRead.textures[idxs[0]].data.data() + dataRead.textures[idxs[0]].data.size(),
                       std::back_inserter(data));
         }
 
         return std::string_view { data.data(), data.size() };
     });
 
-    // get imgui's draw data
-    m_impl->incpp.var("imgui.n_draw_lists", [this](const auto & ) {
-        std::shared_lock lock(m_impl->mutex);
+    incpp.var("imgui.n_draw_lists", [this](const auto & ) {
+        std::shared_lock lock(mutex);
 
-        return incppect::view(m_impl->dataRead.drawLists.size());
+        return IC::view(dataRead.drawLists.size());
     });
 
-    m_impl->incpp.var("imgui.draw_list[%d]", [this](const auto & idxs) {
-        static std::vector<char> data;
+    incpp.var("imgui.draw_list[%d]", [this](const auto & idxs) {
+        static thread_local std::vector<char> data;
         {
-            std::shared_lock lock(m_impl->mutex);
+            std::shared_lock lock(mutex);
 
-            if (idxs[0] >= (int) m_impl->dataRead.drawLists.size()) {
-                return std::string_view { nullptr, 0 };
+            if (idxs[0] >= (int) dataRead.drawLists.size()) {
+                return std::string_view {};
             }
 
-            data.clear();
-            std::copy(m_impl->dataRead.drawLists[idxs[0]].data(),
-                      m_impl->dataRead.drawLists[idxs[0]].data() + m_impl->dataRead.drawLists[idxs[0]].size(),
-                      std::back_inserter(data));
+            const auto & list = dataRead.drawLists[idxs[0]];
+            data.assign(list.begin(), list.end());
         }
 
         return std::string_view { data.data(), data.size() };
     });
 
-    m_impl->incpp.handler([&](int clientId, incppect::EventType etype, std::string_view data) {
-        Event event;
+    incpp.handler([this](int clientId, typename IC::EventType etype, std::string_view data) {
+        ImGuiWS::Event event;
 
         event.clientId = clientId;
 
         switch (etype) {
-            case incppect::Connect:
+            case IC::Connect:
                 {
-                    ++m_impl->nConnected;
-                    event.type = Event::Connected;
+                    ++nConnected;
+                    event.type = ImGuiWS::Event::Connected;
                     std::stringstream ss;
                     { int a = data[0]; if (a < 0) a += 256; ss << a << "."; }
                     { int a = data[1]; if (a < 0) a += 256; ss << a << "."; }
                     { int a = data[2]; if (a < 0) a += 256; ss << a << "."; }
                     { int a = data[3]; if (a < 0) a += 256; ss << a; }
                     event.ip = ss.str();
-                    if (m_impl->handlerConnect) {
-                        m_impl->handlerConnect();
+                    if (handlerConnect) {
+                        handlerConnect();
                     }
                 }
                 break;
-            case incppect::Disconnect:
+            case IC::Disconnect:
                 {
-                    --m_impl->nConnected;
-                    event.type = Event::Disconnected;
-                    if (m_impl->handlerDisconnect) {
-                        m_impl->handlerDisconnect();
+                    --nConnected;
+                    event.type = ImGuiWS::Event::Disconnected;
+                    if (handlerDisconnect) {
+                        handlerDisconnect();
                     }
                 }
                 break;
-            case incppect::Custom:
+            case IC::Custom:
                 {
                     std::stringstream ss;
                     ss << data;
@@ -197,102 +245,132 @@ bool ImGuiWS::init(int32_t port, std::string pathHttp, std::vector<std::string> 
                     int type = -1;
                     ss >> type;
 
-                    //printf("Received event %d '%s'\n", type, ss.str().c_str());
                     switch (type) {
                         case 0:
-                            {
-                                // mouse move
-                                event.type = Event::MouseMove;
-                                ss >> event.mouse_x >> event.mouse_y;
-                                //printf("    mouse %g %g\n", event.mouse_x, event.mouse_y);
-                            }
+                            event.type = ImGuiWS::Event::MouseMove;
+                            ss >> event.mouse_x >> event.mouse_y;
                             break;
                         case 1:
-                            {
-                                // mouse down
-                                event.type = Event::MouseDown;
-                                ss >> event.mouse_but >> event.mouse_x >> event.mouse_y;
-                                //printf("    mouse %d down\n", event.mouse_but);
-                            }
+                            event.type = ImGuiWS::Event::MouseDown;
+                            ss >> event.mouse_but >> event.mouse_x >> event.mouse_y;
                             break;
                         case 2:
-                            {
-                                // mouse up
-                                event.type = Event::MouseUp;
-                                ss >> event.mouse_but >> event.mouse_x >> event.mouse_y;
-                                //printf("    mouse %d up\n", event.mouse_but);
-                            }
+                            event.type = ImGuiWS::Event::MouseUp;
+                            ss >> event.mouse_but >> event.mouse_x >> event.mouse_y;
                             break;
                         case 3:
-                            {
-                                // mouse wheel
-                                event.type = Event::MouseWheel;
-                                ss >> event.wheel_x >> event.wheel_y;
-                            }
+                            event.type = ImGuiWS::Event::MouseWheel;
+                            ss >> event.wheel_x >> event.wheel_y;
                             break;
                         case 4:
-                            {
-                                // key press
-                                event.type = Event::KeyPress;
+                            event.type = ImGuiWS::Event::KeyPress;
+                            if (!::parseClipboardText(data, event.input_text)) {
                                 ss >> event.key;
+                                if (event.key > 0 && event.key < 256) {
+                                    event.input_text.assign(1, static_cast<char>(event.key));
+                                }
                             }
                             break;
                         case 5:
-                            {
-                                // key down
-                                event.type = Event::KeyDown;
-                                ss >> event.key;
-                            }
+                            event.type = ImGuiWS::Event::KeyDown;
+                            ss >> event.key;
                             break;
                         case 6:
-                            {
-                                // key up
-                                event.type = Event::KeyUp;
-                                ss >> event.key;
-                            }
+                            event.type = ImGuiWS::Event::KeyUp;
+                            ss >> event.key;
                             break;
                         case 7:
-                            {
-                                // resize
-                                event.type = Event::Resize;
-                                ss >> event.client_width >> event.client_height;
+                            event.type = ImGuiWS::Event::Resize;
+                            ss >> event.client_width >> event.client_height;
+                            if (!(ss >> event.client_pixel_ratio)) {
+                                event.client_pixel_ratio = 1.0f;
                             }
                             break;
                         case 8:
-                            {
-                                // take control
-                                event.type = Event::TakeControl;
-                            }
+                            event.type = ImGuiWS::Event::TakeControl;
+                            break;
+                        case 9:
+                            event.type = ImGuiWS::Event::PasteFromBrowser;
+                            ::parseClipboardText(data, event.clipboard_text);
                             break;
                         default:
-                            {
-                                printf("Unknown input received from client: id = %d, type = %d\n", clientId, type);
-                                return;
-                            }
-                            break;
+                            printf("Unknown input received from client: id = %d, type = %d\n", clientId, type);
+                            return;
                     };
                 }
                 break;
         };
 
-        m_impl->events.push(std::move(event));
+        events.push(std::move(event));
     });
 
     resources.push_back("imgui-ws.js");
-    m_impl->incpp.setResource("/imgui-ws.js", kImGuiWS_js);
+    incpp.setResource("/imgui-ws.js", kImGuiWS_js);
 
-    // start the http/websocket server
-    incppect::Parameters parameters;
+    typename IC::Parameters parameters;
+    parameters.hostListen = options.hostListen;
     parameters.portListen = port;
     parameters.maxPayloadLength_bytes = 1024*1024;
     parameters.tLastRequestTimeout_ms = -1;
     parameters.httpRoot = std::move(pathHttp);
+    parameters.staticRoot = options.staticRoot;
     parameters.resources = std::move(resources);
-    parameters.sslKey = "key.pem";
-    parameters.sslCert = "cert.pem";
-    m_impl->worker = m_impl->incpp.runAsync(parameters);
+    parameters.sslKey = options.sslKey;
+    parameters.sslCert = options.sslCert;
+    worker = incpp.runAsync(parameters);
 
-    return m_impl->worker.joinable();
+    return worker.joinable();
+}
+
+ImGuiWS::ImGuiWS() : m_impl(new Impl()) {
+}
+
+ImGuiWS::~ImGuiWS() {
+    m_impl->dispatch([](auto & incpp) { incpp.stop(); });
+    if (m_impl->worker.joinable()) {
+        m_impl->worker.join();
+    }
+}
+
+bool ImGuiWS::addVar(const TPath & path, TGetter && getter) {
+    return m_impl->dispatch([&](auto & incpp) {
+        return incpp.var(path, std::move(getter));
+    });
+}
+
+void ImGuiWS::addResource(const std::string & url, const std::string & content) {
+    m_impl->dispatch([&](auto & incpp) {
+        incpp.setResource(url, content);
+    });
+}
+
+bool ImGuiWS::init(int32_t port, std::string pathHttp, std::vector<std::string> resources) {
+    return init(port, std::move(pathHttp), std::move(resources), InitOptions());
+}
+
+bool ImGuiWS::init(int32_t port, std::string pathHttp, std::vector<std::string> resources, const InitOptions & options) {
+    if (options.useSsl) {
+#ifdef IMGUI_WS_HAVE_SSL
+        m_impl->useSsl = true;
+        m_impl->incppSsl.emplace();
+        return m_impl->setupServer(
+            *m_impl->incppSsl,
+            port,
+            std::move(pathHttp),
+            std::move(resources),
+            options);
+#else
+        fprintf(stderr, "[imgui-ws] --ssl requested but WSS support was not compiled in (rebuild with -DLIBGUI_BUILD_SSL=ON)\n");
+        return false;
+#endif
+    }
+
+    return m_impl->setupServer(
+        m_impl->incppPlain,
+        port,
+        std::move(pathHttp),
+        std::move(resources),
+        options);
 }
 
 bool ImGuiWS::setTexture(TextureId textureId, Texture::Type textureType, int32_t width, int32_t height, const char * data) {
@@ -338,16 +416,25 @@ bool ImGuiWS::setTexture(TextureId textureId, Texture::Type textureType, int32_t
 }
 
 bool ImGuiWS::init(int32_t port, std::string pathHttp, std::vector<std::string> resources, THandler && handlerConnect, THandler && handlerDisconnect) {
+    return init(port, std::move(pathHttp), std::move(resources), std::move(handlerConnect), std::move(handlerDisconnect), InitOptions());
+}
+
+bool ImGuiWS::init(int32_t port, std::string pathHttp, std::vector<std::string> resources, THandler && handlerConnect, THandler && handlerDisconnect, const InitOptions & options) {
     m_impl->handlerConnect = std::move(handlerConnect);
     m_impl->handlerDisconnect = std::move(handlerDisconnect);
 
-    return init(port, std::move(pathHttp), std::move(resources));
+    return init(port, std::move(pathHttp), std::move(resources), options);
 }
 
 bool ImGuiWS::setDrawData(const ImDrawData * drawData) {
     bool result = true;
 
+    const auto t0 = std::chrono::steady_clock::now();
     result &= m_impl->compressorDrawData->setDrawData(drawData);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    m_impl->lastEncodeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    m_impl->lastEncodePayloadBytes = m_impl->compressorDrawData->drawListsSize();
 
     auto & drawLists = m_impl->compressorDrawData->getDrawLists();
     auto & drawListsDiff = m_impl->compressorDrawData->getDrawListsDiff();
@@ -365,6 +452,81 @@ bool ImGuiWS::setDrawData(const ImDrawData * drawData) {
 
 int32_t ImGuiWS::nConnected() const {
     return m_impl->nConnected;
+}
+
+std::vector<std::string> ImGuiWS::varPaths() const {
+    return m_impl->dispatch([&](const auto & incpp) {
+        return incpp.varPaths();
+    });
+}
+
+std::vector<char> ImGuiWS::sampleVar(const std::string & path, const std::vector<int> & idxs) const {
+    return m_impl->dispatch([&](const auto & incpp) {
+        return incpp.sampleVar(path, idxs);
+    });
+}
+
+ImGuiWS::DrawDataEncodeInfo ImGuiWS::lastDrawDataEncodeInfo() const {
+    DrawDataEncodeInfo info;
+    info.encodeMs = m_impl->lastEncodeMs;
+    info.payloadBytes = m_impl->lastEncodePayloadBytes;
+    return info;
+}
+
+ImGuiWS::TextureInfo ImGuiWS::textureInfo(TextureId textureId) const {
+    TextureInfo info;
+    info.id = textureId;
+
+    std::shared_lock lock(m_impl->mutex);
+
+    const auto it = m_impl->dataRead.textures.find(textureId);
+    if (it == m_impl->dataRead.textures.end()) {
+        return info;
+    }
+
+    const auto & data = it->second.data;
+    if (data.size() < 20) {
+        return info;
+    }
+
+    int32_t type = 0;
+    std::memcpy(&type, data.data() + 4, sizeof(type));
+    std::memcpy(&info.width, data.data() + 8, sizeof(info.width));
+    std::memcpy(&info.height, data.data() + 12, sizeof(info.height));
+    std::memcpy(&info.revision, data.data() + 16, sizeof(info.revision));
+
+    if (info.width <= 0 || info.height <= 0 || type < 0 || type > 3) {
+        return info;
+    }
+
+    info.type = static_cast<Texture::Type>(type);
+    info.byteSize = data.size();
+    info.valid = true;
+    return info;
+}
+
+std::vector<std::string> ImGuiWS::embeddedResources() const {
+    return m_impl->dispatch([&](const auto & incpp) {
+        return incpp.embeddedResources();
+    });
+}
+
+std::vector<std::string> ImGuiWS::httpResourceRoutes() const {
+    return m_impl->dispatch([&](const auto & incpp) {
+        return incpp.httpResourceRoutes();
+    });
+}
+
+std::string ImGuiWS::httpRoot() const {
+    return m_impl->dispatch([&](const auto & incpp) {
+        return incpp.httpRoot();
+    });
+}
+
+std::string ImGuiWS::staticRoot() const {
+    return m_impl->dispatch([&](const auto & incpp) {
+        return incpp.staticRoot();
+    });
 }
 
 std::deque<ImGuiWS::Event> ImGuiWS::takeEvents() {

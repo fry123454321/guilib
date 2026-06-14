@@ -1,13 +1,18 @@
 cmake_minimum_required (VERSION 3.10)
-project(imgui-ws)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS "on")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(imgui-ws)
+endif()
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(IMGUI_WS_STANDALONE ON)
 else()
     set(IMGUI_WS_STANDALONE OFF)
+endif()
+
+if(IMGUI_WS_STANDALONE)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS "on")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 # options
@@ -51,17 +56,19 @@ if (IMGUI_WS_SUPPORT_SDL2)
     string(STRIP "${SDL2_LIBRARIES}" SDL2_LIBRARIES)
 endif()
 
-# main
+if(LIBGUI_FIND_DEPS OR IMGUI_WS_STANDALONE)
+    find_package(Threads REQUIRED)
+endif()
 
-find_package(Threads REQUIRED)
+if(LIBGUI_STANDALONE OR IMGUI_WS_STANDALONE)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo")
-endif ()
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+        set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo")
+    endif()
+endif()
 
 #add_subdirectory(third-party)
 add_subdirectory(src)
@@ -70,6 +77,3 @@ if (IMGUI_WS_STANDALONE)
     add_subdirectory(examples)
     add_subdirectory(tools)
 endif()
-
-add_subdirectory(examples)
-add_subdirectory(tools)

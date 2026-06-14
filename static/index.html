@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>imgui-ws : demo-null</title>
+    <script src="/static/incppect.js"></script>
+    <script src="/static/imgui-ws.js"></script>
+    <style>
+        :root {
+            --dock-width: 300px;
+            --dock-collapsed-edge: 2px;
+            --dock-toggle-size: 32px;
+            --dock-transition: 0.2s ease;
+        }
+
+        html, body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #dock {
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: var(--dock-width);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            box-sizing: border-box;
+            background: rgba(12, 12, 16, 0.92);
+            border-right: 1px solid rgba(255, 255, 255, 0.12);
+            color: #ccc;
+            font: 11px/1.5 monospace;
+            transform: translateX(0);
+            transition: transform var(--dock-transition);
+            overflow: visible;
+            will-change: transform;
+        }
+
+        #dock.collapsed {
+            transform: translateX(calc(-1 * (var(--dock-width) - var(--dock-collapsed-edge))));
+        }
+
+        #dock-header {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            padding-right: calc(var(--dock-toggle-size) * 0.5 + 12px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            min-height: 40px;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        #dock-title {
+            flex: 1;
+            color: #eee;
+            font-weight: bold;
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #dock-toggle {
+            position: absolute;
+            top: 50%;
+            right: 0;
+            z-index: 1001;
+            width: var(--dock-toggle-size);
+            height: var(--dock-toggle-size);
+            padding: 0;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            border-radius: 50%;
+            background: rgba(18, 18, 24, 0.95);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+            color: #eee;
+            font: 16px/1 sans-serif;
+            cursor: pointer;
+            transform: translate(50%, -50%);
+            transition: background var(--dock-transition), border-color var(--dock-transition);
+        }
+
+        #dock-toggle:hover {
+            background: rgba(32, 32, 40, 0.98);
+            border-color: rgba(255, 255, 255, 0.35);
+        }
+
+        #dock-body {
+            flex: 1;
+            min-height: 0;
+            overflow-x: hidden;
+            overflow-y: auto;
+            padding: 10px 12px;
+            padding-right: calc(var(--dock-toggle-size) * 0.5 + 12px);
+        }
+
+        #ws-stats .group + .group,
+        #ws-stats + .section,
+        #dock .section + .section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        #ws-stats .group-name,
+        #dock .section-name {
+            margin-bottom: 6px;
+            color: #888;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        #ws-stats .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 2px;
+        }
+
+        #ws-stats .row span:first-child {
+            color: #888;
+            flex-shrink: 0;
+        }
+
+        #ws-stats .row span:last-child {
+            text-align: right;
+            word-break: break-all;
+        }
+
+        #ws-stats .traffic-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        #ws-stats .traffic-table col.col-label { width: 34%; }
+        #ws-stats .traffic-table col.col-down { width: 33%; }
+        #ws-stats .traffic-table col.col-up { width: 33%; }
+
+        #ws-stats .traffic-table th {
+            color: #888;
+            font-weight: normal;
+            text-align: left;
+            vertical-align: baseline;
+            padding: 0 6px 2px 0;
+        }
+
+        #ws-stats .traffic-table td {
+            color: #ccc;
+            text-align: left;
+            vertical-align: baseline;
+            padding: 0 0 2px 0;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #ws-stats .traffic-table .traffic-arrow {
+            color: #888;
+            display: inline-block;
+            width: 1.2em;
+            text-align: center;
+        }
+
+        #ws-stats .ok   { color: #8d8; }
+        #ws-stats .wait { color: #cc8; }
+        #ws-stats .bad  { color: #d88; }
+
+        #clipboard-log {
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 120px;
+            overflow-y: auto;
+            color: #9cf;
+            font-size: 10px;
+            line-height: 1.4;
+        }
+
+        #ws-errors {
+            white-space: pre-wrap;
+            word-break: break-word;
+            min-height: 2.8em;
+            max-height: 120px;
+            overflow-y: auto;
+            color: #f99;
+            font-size: 10px;
+            line-height: 1.4;
+        }
+
+        #ws-errors:empty::before {
+            content: '—';
+            color: inherit;
+        }
+
+        #clipboard-fallback .hint {
+            display: block;
+            margin-bottom: 8px;
+            color: #888;
+            font: 11px/1.4 sans-serif;
+        }
+
+        #clipboard-fallback-text {
+            display: block;
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 64px;
+            max-height: 120px;
+            margin-bottom: 8px;
+            padding: 6px 8px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.35);
+            color: #eee;
+            font: 12px/1.35 monospace;
+            resize: vertical;
+        }
+
+        #clipboard-fallback-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        #clipboard-fallback button {
+            flex: 1 1 auto;
+            min-width: 120px;
+            padding: 6px 10px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #eee;
+            font: 12px sans-serif;
+            cursor: pointer;
+        }
+
+        #clipboard-fallback button:hover {
+            background: rgba(255, 255, 255, 0.14);
+        }
+
+        #canvas-wrap {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: var(--dock-width);
+            z-index: 1;
+            transition: left var(--dock-transition);
+            overflow: hidden;
+        }
+
+        body.dock-collapsed #canvas-wrap {
+            left: var(--dock-collapsed-edge);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <aside id="dock">
+        <div id="dock-header">
+            <span id="dock-title">Панель управления</span>
+        </div>
+        <button type="button" id="dock-toggle" title="Свернуть панель" aria-expanded="true">«</button>
+        <div id="dock-body">
+            <div id="ws-stats">
+                <div class="section">
+                    <div class="section-name">Подключение</div>
+                    <div class="row"><span>Статус</span><span id="ws-status" class="wait">—</span></div>
+                    <div class="row"><span>URI</span><span id="ws-uri">—</span></div>
+                    <div class="row"><span>Client ID</span><span id="ws-client-id">—</span></div>
+                    <div class="row"><span>Частота запросов</span><span id="ws-update-freq">—</span></div>
+                </div>
+
+                <div class="section">
+                    <div class="section-name">Передача данных</div>
+                    <table class="traffic-table">
+                        <colgroup>
+                            <col class="col-label">
+                            <col class="col-down">
+                            <col class="col-up">
+                        </colgroup>
+                        <tbody>
+                            <tr>
+                                <th scope="row">Пакеты</th>
+                                <td><span class="traffic-arrow">↓</span><span id="ws-rx-n">0</span></td>
+                                <td><span class="traffic-arrow">↑</span><span id="ws-tx-n">0</span></td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Объём</th>
+                                <td><span class="traffic-arrow">↓</span><span id="ws-rx-bytes">0 B</span></td>
+                                <td><span class="traffic-arrow">↑</span><span id="ws-tx-bytes">0 B</span></td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Скорость</th>
+                                <td><span class="traffic-arrow">↓</span><span id="ws-rx-rate">0 B/s</span></td>
+                                <td><span class="traffic-arrow">↑</span><span id="ws-tx-rate">0 B/s</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="clipboard-fallback" class="section">
+                <div class="section-name">Буфер обмена</div>
+                <span class="hint">Костыль для удаленных соединений по HTTP</span>
+                <textarea id="clipboard-fallback-text" rows="3" placeholder="Текст для вставки в ImGui…"></textarea>
+                <div id="clipboard-fallback-actions">
+                    <button type="button" id="clipboard-fallback-paste">Вставить в ImGui</button>
+                    <button type="button" id="clipboard-fallback-pull">Из ImGui в поле</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-name">Clipboard log</div>
+                <div id="clipboard-log">—</div>
+            </div>
+
+            <div class="section">
+                <div class="section-name">Errors log</div>
+                <div id="ws-errors">—</div>
+            </div>
+        </div>
+    </aside>
+
+    <div id="canvas-wrap">
+        <canvas id="canvas_main" tabindex="0"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas_main');
+        const canvasWrap = document.getElementById('canvas-wrap');
+        const dock = document.getElementById('dock');
+        const dockToggle = document.getElementById('dock-toggle');
+
+        const dockPanel = {
+            collapsed: false,
+            animating: false,
+            slideEndTimer: 0,
+
+            setCollapsed: function(collapsed) {
+                if (this.collapsed === collapsed) {
+                    return;
+                }
+                this.collapsed = collapsed;
+                this.animating = true;
+                dock.classList.toggle('collapsed', collapsed);
+                document.body.classList.toggle('dock-collapsed', collapsed);
+                dockToggle.textContent = collapsed ? '»' : '«';
+                dockToggle.title = collapsed ? 'Развернуть панель' : 'Свернуть панель';
+                dockToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+                this.armSlideEndFallback();
+            },
+
+            armSlideEndFallback: function() {
+                if (this.slideEndTimer) {
+                    clearTimeout(this.slideEndTimer);
+                }
+                const self = this;
+                this.slideEndTimer = setTimeout(function() {
+                    self.onSlideEnd();
+                }, 250);
+            },
+
+            clearSlideEndFallback: function() {
+                if (this.slideEndTimer) {
+                    clearTimeout(this.slideEndTimer);
+                    this.slideEndTimer = 0;
+                }
+            },
+
+            onSlideEnd: function() {
+                if (!this.animating) {
+                    return;
+                }
+                this.clearSlideEndFallback();
+                this.animating = false;
+                scheduleCanvasResize();
+            },
+
+            toggle: function() {
+                this.setCollapsed(!this.collapsed);
+            },
+        };
+
+        dockToggle.addEventListener('click', function() {
+            dockPanel.toggle();
+        });
+
+        canvasWrap.addEventListener('transitionend', function(evt) {
+            if (evt.target === canvasWrap && evt.propertyName === 'left') {
+                dockPanel.onSlideEnd();
+            }
+        });
+
+        let resizeCanvasRaf = 0;
+        function scheduleCanvasResize() {
+            if (resizeCanvasRaf) {
+                cancelAnimationFrame(resizeCanvasRaf);
+            }
+            resizeCanvasRaf = requestAnimationFrame(function() {
+                resizeCanvasRaf = requestAnimationFrame(resizeCanvas);
+            });
+        }
+
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            const w = canvasWrap.clientWidth;
+            const h = canvasWrap.clientHeight;
+            if (w < 1 || h < 1) {
+                return;
+            }
+            canvas.width = Math.round(w * dpr);
+            canvas.height = Math.round(h * dpr);
+            canvas.style.width = w + 'px';
+            canvas.style.height = h + 'px';
+            if (typeof imgui_ws !== 'undefined') {
+                imgui_ws.device_pixel_ratio = dpr;
+                if (typeof incppect !== 'undefined' && incppect.ws && incppect.ws.readyState === WebSocket.OPEN) {
+                    imgui_ws.send_resize(incppect);
+                }
+            }
+        }
+
+        window.addEventListener('resize', scheduleCanvasResize);
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', scheduleCanvasResize);
+        }
+        if (window.ResizeObserver) {
+            new ResizeObserver(function() {
+                if (dockPanel.animating) {
+                    return;
+                }
+                scheduleCanvasResize();
+            }).observe(canvasWrap);
+        }
+        scheduleCanvasResize();
+
+        const wsPanel = {
+            uiIntervalMs: 500,
+            lastUiMs: 0,
+            lastSample: null,
+            smoothRxRate: 0,
+            smoothTxRate: 0,
+
+            statusEl: document.getElementById('ws-status'),
+            uriEl: document.getElementById('ws-uri'),
+            clientIdEl: document.getElementById('ws-client-id'),
+            updateFreqEl: document.getElementById('ws-update-freq'),
+            rxNEl: document.getElementById('ws-rx-n'),
+            rxBytesEl: document.getElementById('ws-rx-bytes'),
+            rxRateEl: document.getElementById('ws-rx-rate'),
+            txNEl: document.getElementById('ws-tx-n'),
+            txBytesEl: document.getElementById('ws-tx-bytes'),
+            txRateEl: document.getElementById('ws-tx-rate'),
+            errorsEl: document.getElementById('ws-errors'),
+
+            formatBytes: function(n) {
+                if (n < 1024) return n + ' B';
+                if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+                return (n / (1024 * 1024)).toFixed(2) + ' MiB';
+            },
+
+            formatRate: function(n) {
+                if (n < 1024) return Math.round(n) + ' B/s';
+                if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB/s';
+                return (n / (1024 * 1024)).toFixed(2) + ' MiB/s';
+            },
+
+            setStatus: function(text, cls) {
+                this.statusEl.textContent = text;
+                this.statusEl.className = cls || '';
+            },
+
+            setError: function(message) {
+                if (!message) {
+                    this.errorsEl.textContent = '';
+                    return;
+                }
+                const ts = new Date().toLocaleTimeString();
+                const line = '[' + ts + '] ' + message;
+                const prev = this.errorsEl.textContent;
+                this.errorsEl.textContent = prev ? (line + '\n' + prev) : line;
+            },
+
+            connectionStatus: function(incppect) {
+                if (!incppect.ws) return { text: 'Переподключение…', cls: 'wait' };
+                switch (incppect.ws.readyState) {
+                    case WebSocket.CONNECTING: return { text: 'Подключение…', cls: 'wait' };
+                    case WebSocket.OPEN: return { text: 'Подключено', cls: 'ok' };
+                    case WebSocket.CLOSING: return { text: 'Закрытие…', cls: 'wait' };
+                    case WebSocket.CLOSED: return { text: 'Отключено', cls: 'bad' };
+                    default: return { text: 'Неизвестно', cls: '' };
+                }
+            },
+
+            sampleStats: function(incppect, now) {
+                const stats = incppect.stats;
+                if (this.lastSample) {
+                    const dt = (now - this.lastSample.t) / 1000;
+                    if (dt > 0) {
+                        const rx = Math.max(0, (stats.rx_bytes - this.lastSample.rx_bytes) / dt);
+                        const tx = Math.max(0, (stats.tx_bytes - this.lastSample.tx_bytes) / dt);
+                        this.smoothRxRate = this.smoothRxRate * 0.75 + rx * 0.25;
+                        this.smoothTxRate = this.smoothTxRate * 0.75 + tx * 0.25;
+                    }
+                }
+                this.lastSample = {
+                    t: now,
+                    rx_n: stats.rx_n,
+                    rx_bytes: stats.rx_bytes,
+                    tx_n: stats.tx_n,
+                    tx_bytes: stats.tx_bytes,
+                };
+            },
+
+            refresh: function(incppect) {
+                const st = this.connectionStatus(incppect);
+                this.setStatus(st.text, st.cls);
+
+                this.uriEl.textContent = incppect.ws_uri;
+                this.updateFreqEl.textContent = incppect.k_requests_update_freq_ms + ' ms';
+
+                const sample = this.lastSample;
+                if (sample) {
+                    this.rxNEl.textContent = sample.rx_n.toLocaleString();
+                    this.rxBytesEl.textContent = this.formatBytes(sample.rx_bytes);
+                    this.rxRateEl.textContent = this.formatRate(this.smoothRxRate);
+                    this.txNEl.textContent = sample.tx_n.toLocaleString();
+                    this.txBytesEl.textContent = this.formatBytes(sample.tx_bytes);
+                    this.txRateEl.textContent = this.formatRate(this.smoothTxRate);
+                }
+            },
+
+            tick: function(incppect) {
+                const now = incppect.timestamp();
+                if (now - this.lastUiMs < this.uiIntervalMs) {
+                    return;
+                }
+                this.lastUiMs = now;
+                this.sampleStats(incppect, now);
+                this.refresh(incppect);
+            },
+        };
+
+        function init() {
+            incppect.ws_uri = (window.location.protocol === 'https:' ? 'wss:' : 'ws:')
+                + '//' + window.location.host + '/incppect';
+            wsPanel.uriEl.textContent = incppect.ws_uri;
+            wsPanel.updateFreqEl.textContent = incppect.k_requests_update_freq_ms + ' ms';
+            wsPanel.setStatus('Инициализация…', 'wait');
+
+            incppect.render = function() {
+                imgui_ws.incppect_clear_color(this);
+                imgui_ws.clear_background();
+
+                imgui_ws.incppect_ui_scale(this);
+                imgui_ws.incppect_textures(this);
+                imgui_ws.incppect_draw_lists(this);
+                imgui_ws.incppect_clipboard(this);
+                imgui_ws.render();
+
+                wsPanel.clientIdEl.textContent = String(this.get_int32('my_id[%d]', -1) || 0);
+                wsPanel.tick(this);
+            };
+
+            const defaultOnopen = incppect.onopen.bind(incppect);
+            incppect.onopen = function(evt) {
+                defaultOnopen(evt);
+                imgui_ws.schedule_send_resize(incppect);
+                imgui_ws.clear_color_rev = -1;
+                imgui_ws.clear_color_rev_pending = null;
+                imgui_ws.sync_page_background();
+                imgui_ws.clipboard_rev = -1;
+                imgui_ws.clipboard_log_lines = [];
+                var clipboardLogEl = document.getElementById('clipboard-log');
+                if (clipboardLogEl) clipboardLogEl.textContent = '—';
+                wsPanel.lastSample = null;
+                wsPanel.smoothRxRate = 0;
+                wsPanel.smoothTxRate = 0;
+                wsPanel.setStatus('Подключено', 'ok');
+                wsPanel.setError('');
+            };
+
+            const defaultOnclose = incppect.onclose.bind(incppect);
+            incppect.onclose = function(evt) {
+                defaultOnclose(evt);
+                if (incppect.k_auto_reconnect) {
+                    wsPanel.setStatus('Переподключение…', 'wait');
+                } else {
+                    wsPanel.setStatus('Отключено', 'bad');
+                }
+            };
+
+            incppect.onerror = function(evt) {
+                if (typeof evt === 'object') {
+                    wsPanel.setError('Ошибка WebSocket — подробности в консоли');
+                    console.error(evt);
+                } else {
+                    wsPanel.setError(String(evt));
+                }
+            };
+
+            incppect.k_requests_update_freq_ms = 8; // ~120 Hz
+            incppect.init();
+
+            imgui_ws.set_incppect_handlers(incppect);
+            imgui_ws.init('canvas_main');
+            canvas.addEventListener('mousedown', function() { canvas.focus(); });
+
+            document.getElementById('clipboard-fallback-paste').addEventListener('click', function() {
+                imgui_ws.clipboard_fallback_paste_to_imgui(incppect);
+                canvas.focus();
+            });
+            document.getElementById('clipboard-fallback-pull').addEventListener('click', function() {
+                imgui_ws.clipboard_fallback_pull_from_imgui();
+            });
+        }
+
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>

@@ -1,74 +1,27 @@
 cmake_minimum_required(VERSION 3.24)
-project(libgui LANGUAGES CXX)
 
-#------------------------------------------------------------------------
-# Cmake settings
-#------------------------------------------------------------------------
-set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/libgui_defaults.cmake)
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib_static)
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # compile_commands.json
-set(CMAKE_CXX_EXTENSIONS OFF)           # Без gnu++17-расширений
-set(CMAKE_POSITION_INDEPENDENT_CODE ON) # Без этого на Linux могут быть проблемы при линковке shared lib.
-
-set(CMAKE_BUILD_RPATH ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
-
-# LTO оптимизации
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
-
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
-        "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+if(LIBGUI_STANDALONE)
+    project(libgui LANGUAGES CXX)
 endif()
 
-#------------------------------------------------------------------------
-# Comliper settings
-#------------------------------------------------------------------------
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(
-        -Wall -Wextra -Wpedantic
-        -Wno-reorder
-    )
+option(LIBGUI_BUILD_SSL "Enable HTTPS/WSS support (requires OpenSSL)" OFF)
 
-    add_compile_options($<$<CONFIG:Debug>:-g3>)
-    add_compile_options($<$<CONFIG:Debug>:-O0>)
-    add_compile_options($<$<CONFIG:RelWithDebInfo>:-O2>)
-    add_compile_options($<$<CONFIG:RelWithDebInfo>:-g>)
-
-    # Sanitize (Debug only)
-    add_compile_options($<$<CONFIG:Debug>:-fsanitize=address>)
-    add_compile_options($<$<CONFIG:Debug>:-fno-omit-frame-pointer>)
-    add_link_options($<$<CONFIG:Debug>:-fsanitize=address>)
-
-endif()
+libgui_configure_ssl()
 
 #------------------------------------------------------------------------
-# Globals
-#------------------------------------------------------------------------
-option(INCPPECT_NO_SSL "Disable SSL in incppect" ON)
-option(IMGUI_WS_BUILD_EXAMPLES_NULL "Build headless imgui-ws examples" ON)
-
-#------------------------------------------------------------------------
-# Conan (генерируется через Makefile)
+# Conan (standalone: optional auto-install via Makefile / CONAN_FORCE_AUTO_UPDATE)
 #------------------------------------------------------------------------
 option(CONAN_FORCE_AUTO_UPDATE OFF)
-if(CONAN_FORCE_AUTO_UPDATE)
-
-    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(LIBGUI_STANDALONE AND CONAN_FORCE_AUTO_UPDATE)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(CONAN_BUILD_TYPE Debug)
     else()
         set(CONAN_BUILD_TYPE Release)
     endif()
 
-    set(CONAN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/.conan)    
+    set(CONAN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/.conan)
     execute_process(
         COMMAND conan install ${CMAKE_SOURCE_DIR}/conan -of ${CONAN_OUTPUT_DIR} -s build_type=${CMAKE_BUILD_TYPE}
         --build=missing
@@ -82,13 +35,19 @@ if(CONAN_FORCE_AUTO_UPDATE)
     endif()
 
     include(${CONAN_OUTPUT_DIR}/conan_toolchain.cmake)
-
 endif()
 
-find_package(uwebsockets CONFIG REQUIRED)
+if(LIBGUI_FIND_DEPS)
+    find_package(uwebsockets CONFIG REQUIRED)
+    find_package(Threads REQUIRED)
+    find_package(ZLIB REQUIRED)
+endif()
 
 #------------------------------------------------------------------------
-# Projects
+# Libraries + optional app
 #------------------------------------------------------------------------
-
 add_subdirectory(third-party)
+
+if(LIBGUI_BUILD_APP)
+    add_subdirectory(app)
+endif()

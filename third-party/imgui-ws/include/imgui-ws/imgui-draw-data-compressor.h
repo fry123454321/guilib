@@ -42,6 +42,16 @@ public:
         return res;
     }
 
+    virtual uint64_t drawListsSize() const {
+        uint64_t res = 0;
+
+        for (const auto & list : m_drawListsCur) {
+            res += list.size();
+        }
+
+        return res;
+    }
+
 protected:
     DrawLists m_drawListsCur;
     DrawLists m_drawListsPrev;

@@ -12,6 +12,8 @@ add_library(imgui
     imgui/imgui_widgets.cpp
     )
 
+libgui_apply_target_defaults(imgui)
+
 target_include_directories(imgui INTERFACE
     .
     )

@@ -11,14 +11,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
-
-// TODO: fix
-const std::string DATA_PATH = "/home/builder/cpp/guilib/data/";
-
+#include <system_error>
 
 #ifdef INCPPECT_DEBUG
 #define my_printf printf
@@ -94,24 +92,31 @@ struct Incppect<SSL>::Impl {
         wsBehaviour.maxPayloadLength = parameters.maxPayloadLength_bytes;
         wsBehaviour.idleTimeout = parameters.tIdleTimeout_s;
         wsBehaviour.open = [&](auto * ws) {
-            static int32_t uniqueId = 1;
-            ++uniqueId;
+            static int32_t uniqueId = 0;
+            const int32_t clientId = uniqueId++;
 
-            auto & cd = clientData[uniqueId];
+            auto & cd = clientData[clientId];
             cd.tConnected_ms = ::timestamp();
 
             auto addressBytes = ws->getRemoteAddress();
-            cd.ipAddress[0] = addressBytes[12];
-            cd.ipAddress[1] = addressBytes[13];
-            cd.ipAddress[2] = addressBytes[14];
-            cd.ipAddress[3] = addressBytes[15];
+            if (addressBytes.size() == 4) {
+                cd.ipAddress[0] = static_cast<uint8_t>(addressBytes[0]);
+                cd.ipAddress[1] = static_cast<uint8_t>(addressBytes[1]);
+                cd.ipAddress[2] = static_cast<uint8_t>(addressBytes[2]);
+                cd.ipAddress[3] = static_cast<uint8_t>(addressBytes[3]);
+            } else if (addressBytes.size() >= 16) {
+                cd.ipAddress[0] = static_cast<uint8_t>(addressBytes[12]);
+                cd.ipAddress[1] = static_cast<uint8_t>(addressBytes[13]);
+                cd.ipAddress[2] = static_cast<uint8_t>(addressBytes[14]);
+                cd.ipAddress[3] = static_cast<uint8_t>(addressBytes[15]);
+            }
 
             auto sd = (PerSocketData *) ws->getUserData();
-            sd->clientId = uniqueId;
+            sd->clientId = clientId;
             sd->ws = ws;
             sd->mainLoop = uWS::Loop::get();
 
-            socketData.insert({ uniqueId, sd });
+            socketData.insert({ clientId, sd });
 
             my_printf("[incppect] client with id = %d connected\n", sd->clientId);
 
@@ -264,7 +269,7 @@ struct Incppect<SSL>::Impl {
                 res->end(kIncppect_js);
         }).get("/", [](auto *res, auto * /*req*/) {
             res->writeStatus("302 Found");
-            res->writeHeader("Location", "/data/index.html");
+            res->writeHeader("Location", "/static/index.html");
             res->end();
         });
         for (const auto & resource : parameters.resources) {
@@ -320,30 +325,66 @@ struct Incppect<SSL>::Impl {
             return;
         });
 
-        // FileServer handler
-        (*app).get("/data/*", [this](auto *res, auto *req) {
+        // Static files from parameters.staticRoot
+        (*app).get("/static/*", [this](auto *res, auto *req) {
+            namespace fs = std::filesystem;
+
             const std::string url = std::string(req->getUrl());
             my_printf("url = '%s'\n", url.c_str());
 
-            std::string subpath = std::string{req->getUrl().substr(6)};
-            std::ifstream file(DATA_PATH + subpath);
-            if (!file.good())
+            if (parameters.staticRoot.empty()) {
+                res->writeStatus("500 Internal Server Error");
+                res->end("Static root not configured");
+                return;
+            }
+
+            const std::string subpath = std::string{req->getUrl().substr(8)};
+            for (const auto & part : fs::path(subpath)) {
+                if (part == "..") {
+                    res->writeStatus("404 Not Found");
+                    res->end("File not found");
+                    return;
+                }
+            }
+
+            const fs::path root(parameters.staticRoot);
+            const fs::path filePath = (root / subpath).lexically_normal();
+
+            std::error_code ec;
+            if (!fs::is_regular_file(filePath, ec)) {
+                res->writeStatus("404 Not Found");
                 res->end("File not found");
-            
+                return;
+            }
+
+            std::ifstream file(filePath);
+            if (!file) {
+                res->writeStatus("404 Not Found");
+                res->end("File not found");
+                return;
+            }
+
             std::stringstream buffer;
             buffer << file.rdbuf();
-            std::string content = buffer.str();
+            const std::string content = buffer.str();
+
+            if (hasExt(subpath, ".js")) {
+                res->writeHeader("Content-Type", "text/javascript");
+            } else if (hasExt(subpath, ".html")) {
+                res->writeHeader("Content-Type", "text/html; charset=utf-8");
+            }
+
             res->end(content);
             return;
         });
 
-        (*app).listen(parameters.portListen, [this](auto *token) {
+        (*app).listen(parameters.hostListen, parameters.portListen, [this](auto *token) {
             this->listenSocket = token;
             if (token) {
-                my_printf("[incppect] listening on port %d\n", parameters.portListen);
+                my_printf("[incppect] listening on %s:%d\n", parameters.hostListen.c_str(), parameters.portListen);
 
                 const char * kProtocol = SSL ? "https" : "http";
-                my_printf("[incppect] %s://localhost:%d/\n", kProtocol, parameters.portListen);
+                my_printf("[incppect] %s://%s:%d/\n", kProtocol, parameters.hostListen.c_str(), parameters.portListen);
             }
         }).run();
     }
@@ -603,10 +644,72 @@ bool Incppect<SSL>::var(const TPath & path, TGetter && getter) {
 }
 
 template <bool SSL>
+std::vector<typename Incppect<SSL>::TPath> Incppect<SSL>::varPaths() const {
+    std::vector<TPath> res;
+    res.reserve(m_impl->pathToGetter.size());
+    for (const auto & [path, _] : m_impl->pathToGetter) {
+        res.push_back(path);
+    }
+    std::sort(res.begin(), res.end());
+    return res;
+}
+
+template <bool SSL>
+std::vector<char> Incppect<SSL>::sampleVar(const TPath & path, const TIdxs & idxs) const {
+    const auto it = m_impl->pathToGetter.find(path);
+    if (it == m_impl->pathToGetter.end()) {
+        return {};
+    }
+
+    const auto & getter = m_impl->getters[it->second];
+    const std::string_view data = getter(idxs);
+    if (data.data() == nullptr || data.empty()) {
+        return {};
+    }
+    return std::vector<char>(data.data(), data.data() + data.size());
+}
+
+template <bool SSL>
+std::vector<typename Incppect<SSL>::TUrl> Incppect<SSL>::embeddedResources() const {
+    std::vector<TUrl> res;
+    res.reserve(m_impl->resources.size());
+    for (const auto & [url, _] : m_impl->resources) {
+        res.push_back(url);
+    }
+    std::sort(res.begin(), res.end());
+    return res;
+}
+
+template <bool SSL>
+std::vector<typename Incppect<SSL>::TUrl> Incppect<SSL>::httpResourceRoutes() const {
+    std::vector<TUrl> res;
+    res.reserve(m_impl->parameters.resources.size());
+    for (const auto & resource : m_impl->parameters.resources) {
+        if (!resource.empty()) {
+            res.push_back(resource);
+        }
+    }
+    std::sort(res.begin(), res.end());
+    return res;
+}
+
+template <bool SSL>
+std::string Incppect<SSL>::httpRoot() const {
+    return m_impl->parameters.httpRoot;
+}
+
+template <bool SSL>
+std::string Incppect<SSL>::staticRoot() const {
+    return m_impl->parameters.staticRoot;
+}
+
+template <bool SSL>
 void Incppect<SSL>::handler(THandler && handler) {
     m_impl->handler = std::move(handler);
 }
 
 template class Incppect<false>;
-//template class Incppect<true>;
+#ifdef INCPPECT_HAVE_SSL
+template class Incppect<true>;
+#endif
 

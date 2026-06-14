@@ -11,8 +11,8 @@ generate_debug:
 	cmake --fresh --preset Debug -G Ninja
 	cmake --build --preset Debug
 
-run_release:
-	(cd ${dir_release}/bin; ./demo-null)
+run_debug:
+	cd ${dir_debug}/bin && LIBGUI_ROOT_DIR=$(CURDIR) ./app
 
 submodule:
 	git submodule update --init --recursive

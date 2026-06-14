@@ -10,49 +10,63 @@
 
 namespace {
 
+void appendBytes(std::vector<char> & buf, const void * data, size_t n) {
+    const size_t off = buf.size();
+    buf.resize(off + n);
+    std::memcpy(buf.data() + off, data, n);
+}
+
 void writeCmdListToBuffer(const ImDrawList * cmdList, std::vector<char> & buf) {
-    uint32_t nVertices = cmdList->VtxBuffer.Size;
-    std::copy((char *)(&nVertices), (char *)(&nVertices) + sizeof(nVertices), std::back_inserter(buf));
-    std::copy((char *)(cmdList->VtxBuffer.Data), (char *)(cmdList->VtxBuffer.Data) + nVertices*sizeof(ImDrawVert), std::back_inserter(buf));
+    buf.clear();
 
-    uint32_t nIndicesOriginal = cmdList->IdxBuffer.Size;
-    uint32_t nIndices = cmdList->IdxBuffer.Size;
-    if (nIndicesOriginal % 2 == 1) {
-        ++nIndices;
+    const uint32_t nVertices = cmdList->VtxBuffer.Size;
+    const uint32_t nIndicesOriginal = cmdList->IdxBuffer.Size;
+    const uint32_t nIndices = nIndicesOriginal + (nIndicesOriginal % 2);
+    const uint32_t nCmd = cmdList->CmdBuffer.Size;
+
+    const size_t vtxBytes = (size_t) nVertices * sizeof(ImDrawVert);
+    const size_t idxBytes = (size_t) nIndicesOriginal * sizeof(ImDrawIdx);
+    const size_t cmdBytes = (size_t) nCmd * (4 * sizeof(uint32_t) + sizeof(ImVec4));
+
+    buf.reserve(sizeof(uint32_t) + vtxBytes + sizeof(uint32_t) + idxBytes + 2 + sizeof(uint32_t) + cmdBytes);
+
+    appendBytes(buf, &nVertices, sizeof(nVertices));
+    if (nVertices > 0) {
+        appendBytes(buf, cmdList->VtxBuffer.Data, vtxBytes);
     }
-    std::copy((char *)(&nIndices), (char *)(&nIndices) + sizeof(nIndices), std::back_inserter(buf));
-    std::copy((char *)(cmdList->IdxBuffer.Data), (char *)(cmdList->IdxBuffer.Data) + nIndicesOriginal*sizeof(ImDrawIdx), std::back_inserter(buf));
 
+    appendBytes(buf, &nIndices, sizeof(nIndices));
+    if (nIndicesOriginal > 0) {
+        appendBytes(buf, cmdList->IdxBuffer.Data, idxBytes);
+    }
     if (nIndicesOriginal % 2 == 1) {
-        uint16_t idx = 0;
-        std::copy((char *)(&idx), (char *)(&idx) + sizeof(idx), std::back_inserter(buf));
+        const uint16_t idx = 0;
+        appendBytes(buf, &idx, sizeof(idx));
     }
 
-    uint32_t nCmd = cmdList->CmdBuffer.Size;
-    std::copy((char *)(&nCmd), (char *)(&nCmd) + sizeof(nCmd), std::back_inserter(buf));
+    appendBytes(buf, &nCmd, sizeof(nCmd));
 
-    for (uint32_t iCmd = 0; iCmd < nCmd; iCmd++)
-    {
-        const ImDrawCmd* pcmd = &cmdList->CmdBuffer[iCmd];
+    for (uint32_t iCmd = 0; iCmd < nCmd; ++iCmd) {
+        const ImDrawCmd * pcmd = &cmdList->CmdBuffer[iCmd];
 
-        uint32_t nElements = pcmd->ElemCount;
-        std::copy((char *)(&nElements), (char *)(&nElements) + sizeof(nElements), std::back_inserter(buf));
+        const uint32_t nElements = pcmd->ElemCount;
+        appendBytes(buf, &nElements, sizeof(nElements));
 
-        uint32_t textureId = (uint32_t)(intptr_t)pcmd->TextureId;
-        std::copy((char *)(&textureId), (char *)(&textureId) + sizeof(textureId), std::back_inserter(buf));
+        const uint32_t textureId = (uint32_t) (intptr_t) pcmd->TextureId;
+        appendBytes(buf, &textureId, sizeof(textureId));
 
-        uint32_t offsetVtx = (uint32_t)(intptr_t)pcmd->VtxOffset;
-        std::copy((char *)(&offsetVtx), (char *)(&offsetVtx) + sizeof(offsetVtx), std::back_inserter(buf));
+        const uint32_t offsetVtx = (uint32_t) (intptr_t) pcmd->VtxOffset;
+        appendBytes(buf, &offsetVtx, sizeof(offsetVtx));
 
-        uint32_t offsetIdx = (uint32_t)(intptr_t)pcmd->IdxOffset;
-        std::copy((char *)(&offsetIdx), (char *)(&offsetIdx) + sizeof(offsetIdx), std::back_inserter(buf));
+        const uint32_t offsetIdx = (uint32_t) (intptr_t) pcmd->IdxOffset;
+        appendBytes(buf, &offsetIdx, sizeof(offsetIdx));
 
-        auto clipRect = &pcmd->ClipRect;
-        std::copy((char *)(clipRect), (char *)(clipRect) + sizeof(ImVec4), std::back_inserter(buf));
+        appendBytes(buf, &pcmd->ClipRect, sizeof(ImVec4));
     }
 }
 
 }
+
 namespace ImDrawDataCompressor {
 
 struct XorRlePerDrawList::Impl {
@@ -63,82 +77,15 @@ XorRlePerDrawList::XorRlePerDrawList() : m_impl(new Impl()) {}
 XorRlePerDrawList::~XorRlePerDrawList() {}
 
 bool XorRlePerDrawList::setDrawData(const struct ImDrawData * drawData) {
-    m_drawListsPrev = m_drawListsCur;
-
-    uint32_t nCmdLists = drawData->CmdListsCount;
+    const uint32_t nCmdLists = drawData->CmdListsCount;
     m_drawListsCur.resize(nCmdLists);
 
-    for (uint32_t iList = 0; iList < nCmdLists; iList++) {
-        m_drawListsCur[iList].clear();
+    for (uint32_t iList = 0; iList < nCmdLists; ++iList) {
         ::writeCmdListToBuffer(drawData->CmdLists[iList], m_drawListsCur[iList]);
     }
 
-    // calculate diff
-
+    // XOR/RLE diff temporarily disabled — clients receive full draw lists.
     m_drawListsDiff.clear();
-    m_drawListsDiff.resize(nCmdLists);
-
-    for (uint32_t iList = 0; iList < nCmdLists; ++iList) {
-        auto & bufferCur = m_drawListsCur[iList];
-        auto & bufferDiff = m_drawListsDiff[iList];
-
-        bufferDiff.clear();
-
-        int32_t type = 1; // Run-Length Encoding
-        if (iList >= m_drawListsPrev.size() || m_drawListsPrev[iList].size() != bufferCur.size()) {
-            type = 0; // Full update
-        }
-
-        std::copy((char *)(&type), (char *)(&type) + sizeof(type), std::back_inserter(bufferDiff));
-
-        if (type == 0) {
-            std::copy(bufferCur.begin(), bufferCur.end(), std::back_inserter(bufferDiff));
-        } else if (type == 1) {
-            auto & bufferPrev = m_drawListsPrev[iList];
-
-            uint32_t a = 0;
-            uint32_t b = 0;
-            uint32_t c = 0;
-            uint32_t n = 0;
-
-            for (int i = 0; i < (int) bufferCur.size(); i += 4) {
-                std::memcpy((char *)(&a), bufferPrev.data() + i, sizeof(uint32_t));
-                std::memcpy((char *)(&b), bufferCur.data() + i, sizeof(uint32_t));
-                a = a ^ b;
-                if (a == c) {
-                    ++n;
-                } else {
-                    if (n > 0) {
-                        std::copy((char *)(&n), (char *)(&n) + sizeof(uint32_t), std::back_inserter(bufferDiff));
-                        std::copy((char *)(&c), (char *)(&c) + sizeof(uint32_t), std::back_inserter(bufferDiff));
-                    }
-                    n = 1;
-                    c = a;
-                }
-            }
-
-            if (bufferCur.size() % 4 != 0) {
-                a = 0;
-                b = 0;
-                uint32_t i = (bufferCur.size()/4)*4;
-                uint32_t k = bufferCur.size() - i;
-                std::memcpy((char *)(&a), bufferPrev.data() + i, k);
-                std::memcpy((char *)(&b), bufferCur.data() + i, k);
-                a = a ^ b;
-                if (a == c) {
-                    ++n;
-                } else {
-                    std::copy((char *)(&n), (char *)(&n) + sizeof(uint32_t), std::back_inserter(bufferDiff));
-                    std::copy((char *)(&c), (char *)(&c) + sizeof(uint32_t), std::back_inserter(bufferDiff));
-                    n = 1;
-                    c = a;
-                }
-            }
-
-            std::copy((char *)(&n), (char *)(&n) + sizeof(uint32_t), std::back_inserter(bufferDiff));
-            std::copy((char *)(&c), (char *)(&c) + sizeof(uint32_t), std::back_inserter(bufferDiff));
-        }
-    }
 
     return true;
 }

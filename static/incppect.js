@@ -56,9 +56,23 @@ var incppect = {
         this.ws.onerror = function(evt) { onerror(evt) };
 
         this.t_start_ms = this.timestamp();
+        this.t_frame_begin_ms = this.t_start_ms;
         this.t_requests_last_update_ms = this.timestamp() - this.k_requests_update_freq_ms;
 
-        window.requestAnimationFrame(this.loop.bind(this));
+        this.scheduleNextLoop();
+    },
+
+    scheduleNextLoop: function() {
+        if (this.ws == null) {
+            return;
+        }
+        if (this.ws.readyState !== this.ws.OPEN) {
+            window.requestAnimationFrame(this.loop.bind(this));
+            return;
+        }
+        var elapsed = this.timestamp() - this.t_frame_begin_ms;
+        var delay = Math.max(0, this.k_requests_update_freq_ms - elapsed);
+        setTimeout(this.loop.bind(this), delay);
     },
 
     loop: function() {
@@ -70,7 +84,7 @@ var incppect = {
         }
 
         if (this.ws.readyState !== this.ws.OPEN) {
-            window.requestAnimationFrame(this.loop.bind(this));
+            this.scheduleNextLoop();
             return;
         }
 
@@ -97,7 +111,7 @@ var incppect = {
             this.t_requests_last_update_ms = this.timestamp();
         }
 
-        window.requestAnimationFrame(this.loop.bind(this));
+        this.scheduleNextLoop();
     },
 
     get: function(path, ...args) {
@@ -211,16 +225,24 @@ var incppect = {
         return output;
     },
 
+    ws_send: function(data) {
+        if (this.ws == null || this.ws.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+
+        this.ws.send(data);
+        this.stats.tx_n += 1;
+        this.stats.tx_bytes += data.byteLength || data.length;
+        return true;
+    },
+
     send: function(msg) {
         var enc_msg = new TextEncoder().encode(msg);
         var data = new Int8Array(4 + enc_msg.length + 1);
         data[0] = 4;
         data.set(enc_msg, 4);
         data[4 + enc_msg.length] = 0;
-        this.ws.send(data);
-
-        this.stats.tx_n += 1;
-        this.stats.tx_bytes += data.length;
+        this.ws_send(data);
     },
 
     send_var_to_id_map: function() {
@@ -237,10 +259,7 @@ var incppect = {
         data[0] = 1;
         data.set(enc.encode(msg), 4);
         data[4 + msg.length] = 0;
-        this.ws.send(data);
-
-        this.stats.tx_n += 1;
-        this.stats.tx_bytes += data.length;
+        this.ws_send(data);
     },
 
     send_requests: function() {
@@ -259,18 +278,12 @@ var incppect = {
         if (same) {
             var data = new Int32Array(1);
             data[0] = 3;
-            this.ws.send(data);
-
-            this.stats.tx_n += 1;
-            this.stats.tx_bytes += data.length;
+            this.ws_send(data);
         } else {
             var data = new Int32Array(this.requests.length + 1);
             data.set(new Int32Array(this.requests), 1);
             data[0] = 2;
-            this.ws.send(data);
-
-            this.stats.tx_n += 1;
-            this.stats.tx_bytes += data.length;
+            this.ws_send(data);
         }
     },
 

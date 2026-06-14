@@ -7,3 +7,4 @@ class libgui(ConanFile):
 
     def requirements(self):
         self.requires("uwebsockets/20.71.0")
+        self.requires("openssl/3.3.2")
